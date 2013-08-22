@@ -31,11 +31,14 @@ import android.content.res.Resources;
 import android.database.ContentObserver;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Paint;
+import android.media.MediaFile;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
+import android.os.SystemProperties;
 import android.provider.ContactsContract;
 import android.provider.ContactsContract.QuickContact;
 import android.text.SpannableStringBuilder;
@@ -45,6 +48,7 @@ import android.util.Log;
 import android.util.Patterns;
 import android.view.LayoutInflater;
 import android.view.View;
+import android.view.View.OnLayoutChangeListener;
 import android.view.ViewGroup;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -59,6 +63,7 @@ import com.android.email.AttachmentInfo;
 import com.android.email.Controller;
 import com.android.email.ControllerResultUiThreadWrapper;
 import com.android.email.Email;
+import com.android.email.EmailConnectivityManager;
 import com.android.email.Preferences;
 import com.android.email.R;
 import com.android.email.Throttle;
@@ -66,11 +71,14 @@ import com.android.email.mail.internet.EmailHtmlUtil;
 import com.android.email.service.AttachmentDownloadService;
 import com.android.emailcommon.Logging;
 import com.android.emailcommon.mail.Address;
+import com.android.emailcommon.mail.MeetingInfo;
 import com.android.emailcommon.mail.MessagingException;
+import com.android.emailcommon.mail.PackedString;
 import com.android.emailcommon.provider.Account;
 import com.android.emailcommon.provider.EmailContent.Attachment;
 import com.android.emailcommon.provider.EmailContent.Body;
 import com.android.emailcommon.provider.EmailContent.Message;
+import com.android.emailcommon.provider.HostAuth;
 import com.android.emailcommon.provider.Mailbox;
 import com.android.emailcommon.utility.AttachmentUtilities;
 import com.android.emailcommon.utility.EmailAsyncTask;
@@ -117,6 +125,7 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
     private TextView mFromAddressView;
     private TextView mDateTimeView;
     private TextView mAddressesView;
+    private TextView mClipMessage;
     private WebView mMessageContentView;
     private LinearLayout mAttachments;
     private View mTabSection;
@@ -127,10 +136,12 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
     private View mDetailsCollapsed;
     private View mDetailsExpanded;
     private boolean mDetailsFilled;
+    protected boolean mMessageCliped;
 
     private TextView mMessageTab;
     private TextView mAttachmentTab;
     private TextView mInviteTab;
+    private TextView mInviteInfo;
     // It is not really a tab, but looks like one of them.
     private TextView mShowPicturesTab;
     private View mAlwaysShowPicturesButton;
@@ -144,6 +155,10 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
 
     private Controller mController;
     private ControllerResultUiThreadWrapper<ControllerResults> mControllerCallback;
+
+    private static final int MSG_UPDATE_CLIP_MESSAGE = 0;
+    private static final int SEND_DELAY = 500;
+    private Handler mUpdateClipMsgHandler;
 
     // contains the HTML body. Is used by LoadAttachmentTask to display inline images.
     // is null most of the time, is used transiently to pass info to LoadAttachementTask
@@ -298,6 +313,7 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
         mLoadingProgress = UiUtilities.getView(view, R.id.loading_progress);
         mDetailsCollapsed = UiUtilities.getView(view, R.id.sub_header_contents_collapsed);
         mDetailsExpanded = UiUtilities.getView(view, R.id.sub_header_contents_expanded);
+        mClipMessage = UiUtilities.getView(view, R.id.clip_message);
 
         mFromNameView.setOnClickListener(this);
         mFromAddressView.setOnClickListener(this);
@@ -310,6 +326,11 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
         mAlwaysShowPicturesButton = UiUtilities.getView(view, R.id.always_show_pictures_button);
         // Invite is only used in MessageViewFragment, but visibility is controlled here.
         mInviteTab = UiUtilities.getView(view, R.id.show_invite);
+        try {
+            mInviteInfo = UiUtilities.getView(view, R.id.invite_info);
+        } catch (IllegalArgumentException ex) {
+            mInviteInfo = null;
+        }
 
         mMessageTab.setOnClickListener(this);
         mAttachmentTab.setOnClickListener(this);
@@ -321,6 +342,34 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
 
         mAttachmentsScroll = UiUtilities.getView(view, R.id.attachments_scroll);
         mInviteScroll = UiUtilities.getView(view, R.id.invite_scroll);
+
+        mClipMessage.getPaint().setFlags(Paint.UNDERLINE_TEXT_FLAG);
+        mClipMessage.setOnClickListener(this);
+
+        mUpdateClipMsgHandler = new Handler() {
+            @Override
+            public void handleMessage(android.os.Message msg) {
+                if (msg.what == MSG_UPDATE_CLIP_MESSAGE) {
+                    if (mClipMessage != null) {
+                        if (mMessageCliped
+                                && mMessageContentView != null
+                                && mMessageContentView.isShown()) {
+                            mClipMessage.setVisibility(View.VISIBLE);
+                        } else {
+                            mClipMessage.setVisibility(View.GONE);
+                        }
+                    }
+                }
+            }
+        };
+        mMessageContentView.addOnLayoutChangeListener(new OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                    int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                mUpdateClipMsgHandler.removeMessages(MSG_UPDATE_CLIP_MESSAGE);
+                mUpdateClipMsgHandler.sendEmptyMessageDelayed(MSG_UPDATE_CLIP_MESSAGE, SEND_DELAY);
+            }
+        });
 
         WebSettings webSettings = mMessageContentView.getSettings();
         boolean supportMultiTouch = mContext.getPackageManager()
@@ -341,7 +390,7 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
         mController.addResultCallback(mControllerCallback);
 
         resetView();
-        new LoadMessageTask(true).executeParallel();
+        new LoadMessageTask(true, false).executeParallel();
 
         UiUtilities.installFragment(this);
     }
@@ -618,6 +667,7 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
 
         makeVisible(getTabContentViewForFlag(mCurrentTab), true);
         getTabViewForFlag(mCurrentTab).setSelected(true);
+        mUpdateClipMsgHandler.sendEmptyMessage(MSG_UPDATE_CLIP_MESSAGE);
     }
 
     private View getTabViewForFlag(int tabFlag) {
@@ -999,6 +1049,9 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
             case R.id.sub_header_contents_expanded:
                 hideDetails();
                 break;
+            case R.id.clip_message:
+                fetchEntireMail();
+                break;
         }
     }
 
@@ -1046,14 +1099,16 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
     private class LoadMessageTask extends EmailAsyncTask<Void, Void, Message> {
 
         private final boolean mOkToFetch;
+        private final boolean mFromUser;
         private Mailbox mMailbox;
 
         /**
          * Special constructor to cache some local info
          */
-        public LoadMessageTask(boolean okToFetch) {
+        public LoadMessageTask(boolean okToFetch, boolean fromUser) {
             super(mTaskTracker);
             mOkToFetch = okToFetch;
+            mFromUser = fromUser;
         }
 
         @Override
@@ -1080,8 +1135,14 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
                 return;
             }
             mMessageId = message.mId;
+            if ((Utility.ENTIRE_MAIL == Utility.getAccountSyncSize(mContext, message.mAccountKey))
+                    || (message.mFlagLoaded == Message.FLAG_LOADED_COMPLETE)) {
+                mMessageCliped = false;
+            } else {
+                mMessageCliped = true;
+            }
 
-            reloadUiFromMessage(message, mOkToFetch);
+            reloadUiFromMessage(message, mOkToFetch, mFromUser);
             queryContactStatus();
             onMessageShown(mMessageId, mMailbox);
             RecentMailboxManager.getInstance(mContext).touch(mAccountId, message.mMailboxKey);
@@ -1206,6 +1267,9 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
                 }
                 boolean htmlChanged = false;
                 int numDisplayedAttachments = 0;
+                // If not remove original attachments view will cause
+                // show double attachments.
+                mAttachments.removeAllViews();
                 for (Attachment attachment : attachments) {
                     if (mHtmlTextRaw != null && attachment.mContentId != null
                             && attachment.mContentUri != null) {
@@ -1428,8 +1492,9 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
             }
             if (attachmentInfo.mAllowView) {
                 // Set the attachment action button text accordingly
-                if (attachmentInfo.mContentType.startsWith("audio/") ||
-                        attachmentInfo.mContentType.startsWith("video/")) {
+                int fileType = MediaFile.getFileTypeForMimeType(attachmentInfo.mContentType);
+                if (MediaFile.isAudioFileType(fileType)
+                        || MediaFile.isVideoFileType(fileType)) {
                     openButton.setText(R.string.message_view_attachment_play_action);
                 } else if (attachmentInfo.mAllowInstall) {
                     openButton.setText(R.string.message_view_attachment_install_action);
@@ -1543,7 +1608,8 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
      * @param okToFetch If true, and message is not fully loaded, it's OK to fetch from
      * the network.  Use false to prevent looping here.
      */
-    protected void reloadUiFromMessage(Message message, boolean okToFetch) {
+    protected void reloadUiFromMessage(Message message, boolean okToFetch,
+            boolean fetchEntireMailFromUser) {
         mMessage = message;
         mAccountId = message.mAccountKey;
 
@@ -1556,9 +1622,26 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
         // 2. If != LOADED, ask controller to load it
         // 3. Controller callback (after loaded) should trigger LoadBodyTask & LoadAttachmentsTask
         // 4. Else start the loader tasks right away (message already loaded)
-        if (okToFetch && message.mFlagLoaded != Message.FLAG_LOADED_COMPLETE) {
+        boolean needFetchEntireMail = false;
+        if (!SystemProperties.getBoolean("persist.env.email.syncsize", true)
+                || fetchEntireMailFromUser
+                || Utility.getAccountSyncSize(mContext, mAccountId) == Utility.ENTIRE_MAIL) {
+            needFetchEntireMail = true;
+        }
+        boolean needFetchPartialMail = false;
+        if (SystemProperties.getBoolean("persist.env.email.syncsize", true)
+                && !fetchEntireMailFromUser
+                && message.mFlagLoaded != Message.FLAG_LOADED_COMPLETE
+                && message.mFlagLoaded != Message.FLAG_LOADED_SYNC_SIZE_COMPLETE) {
+            needFetchPartialMail = true;
+        }
+        if (okToFetch && needFetchEntireMail
+                && message.mFlagLoaded != Message.FLAG_LOADED_COMPLETE) {
             mControllerCallback.getWrappee().setWaitForLoadMessageId(message.mId);
-            mController.loadMessageForView(message.mId);
+            mController.loadMessageForView(message.mId, Message.FLAG_LOADED_COMPLETE);
+        } else if (okToFetch && needFetchPartialMail) {
+            mControllerCallback.getWrappee().setWaitForLoadMessageId(message.mId);
+            mController.loadMessageForView(message.mId, Message.FLAG_LOADED_SYNC_SIZE_COMPLETE);
         } else {
             Address[] fromList = Address.unpack(mMessage.mFrom);
             boolean autoShowImages = false;
@@ -1619,6 +1702,19 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
             ssb.append(friendlyBcc);
         }
         mAddressesView.setText(ssb);
+        String meetingTime = new PackedString(message.mMeetingInfo).get(MeetingInfo.MEETING_DTSTART);
+        if (meetingTime != null) {
+            long epochTimeMillis = Utility.parseEmailDateTimeToMillis(meetingTime);
+            String friendlyMeetingTime = formatDate(epochTimeMillis, false);
+            meetingTime = new PackedString(message.mMeetingInfo).get(MeetingInfo.MEETING_DTEND);
+            if (meetingTime != null) {
+                epochTimeMillis = Utility.parseEmailDateTimeToMillis(meetingTime);
+                friendlyMeetingTime += "-" + formatDate(epochTimeMillis, false);
+            }
+            if (mInviteInfo != null) {
+                mInviteInfo.setText(mContext.getString(R.string.message_view_invite_text) + " (" + friendlyMeetingTime + ")");
+            }
+        }
     }
 
     /**
@@ -1651,51 +1747,54 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
         boolean hasImages = false;
 
         if (bodyHtml == null) {
-            text = bodyText;
-            /*
-             * Convert the plain text to HTML
-             */
-            StringBuffer sb = new StringBuffer("<html><body>");
-            if (text != null) {
-                // Escape any inadvertent HTML in the text message
-                text = EmailHtmlUtil.escapeCharacterToDisplay(text);
-                // Find any embedded URL's and linkify
-                Matcher m = Patterns.WEB_URL.matcher(text);
-                while (m.find()) {
-                    int start = m.start();
-                    /*
-                     * WEB_URL_PATTERN may match domain part of email address. To detect
-                     * this false match, the character just before the matched string
-                     * should not be '@'.
-                     */
-                    if (start == 0 || text.charAt(start - 1) != '@') {
-                        String url = m.group();
-                        Matcher proto = WEB_URL_PROTOCOL.matcher(url);
-                        String link;
-                        if (proto.find()) {
-                            // This is work around to force URL protocol part be lower case,
-                            // because WebView could follow only lower case protocol link.
-                            link = proto.group().toLowerCase() + url.substring(proto.end());
-                        } else {
-                            // Patterns.WEB_URL matches URL without protocol part,
-                            // so added default protocol to link.
-                            link = "http://" + url;
-                        }
-                        String href = String.format("<a href=\"%s\">%s</a>", link, url);
-                        m.appendReplacement(sb, href);
-                    }
-                    else {
-                        m.appendReplacement(sb, "$0");
-                    }
-                }
-                m.appendTail(sb);
-            }
-            sb.append("</body></html>");
-            text = sb.toString();
+            text = convertTextToHtml(bodyText);
         } else {
             text = bodyHtml;
             mHtmlTextRaw = bodyHtml;
             hasImages = IMG_TAG_START_REGEX.matcher(text).find();
+        }
+
+        // Caused by we want to make least effect on the message view, we will only show the
+        // original mail in the Sent and Outbox for IMAP and POP3 account.
+        if (SystemProperties.getBoolean("persist.env.email.showmail", false)) {
+            Account account = Account.restoreAccountWithId(mContext, mAccountId);
+            HostAuth hostAuth = HostAuth.restoreHostAuthWithId(mContext, account.mHostAuthKeyRecv);
+            Mailbox mailbox = Mailbox.restoreMailboxWithId(mContext, mMessage.mMailboxKey);
+
+            boolean needAppendForAccountType = HostAuth.SCHEME_IMAP.equals(hostAuth.mProtocol)
+                    || HostAuth.SCHEME_POP3.equals(hostAuth.mProtocol);
+            boolean needAppendForMailbox = mailbox.mType == Mailbox.TYPE_OUTBOX
+                    || mailbox.mType == Mailbox.TYPE_SENT;
+
+            if (needAppendForMailbox && needAppendForAccountType) {
+                // Get the intro text from the database, and convert the text to html.
+                String introText = Body.restoreIntroTextWithMessageId(mContext, mMessage.mId);
+                if (!TextUtils.isEmpty(introText)) {
+                    introText = convertTextToHtml(introText);
+                } else {
+                    introText = "";
+                }
+
+                // Get the intro reply html from the database, and convert the text to html.
+                String replyhtml = Body.restoreReplyHtmlWithMessageId(mContext, mMessage.mId);
+                if (!TextUtils.isEmpty(replyhtml)) {
+                    hasImages = hasImages || IMG_TAG_START_REGEX.matcher(replyhtml).find();
+                } else {
+                    replyhtml = "";
+                }
+
+                // Get the reply text from the database, and convert the text to html.
+                String replyText = Body.restoreReplyTextWithMessageId(mContext, mMessage.mId);
+                if (!TextUtils.isEmpty(replyText)) {
+                    replyText = convertTextToHtml(replyText);
+                } else {
+                    replyText = "";
+                }
+
+                // Append the intro text, reply html and reply text to content.
+                text = text + introText + replyhtml + replyText;
+                mHtmlTextRaw = text;
+            }
         }
 
         // TODO this is not really accurate.
@@ -1720,6 +1819,54 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
         new LoadAttachmentsTask().executeParallel(mMessage.mId);
 
         mIsMessageLoadedForTest = true;
+    }
+
+    /**
+     * Convert the plain text to HTML
+     * @param text plain text part
+     */
+    private String convertTextToHtml(String text) {
+        String result = null;
+
+        StringBuffer sb = new StringBuffer("<html><body>");
+        if (text != null) {
+            // Escape any inadvertent HTML in the text message
+            text = EmailHtmlUtil.escapeCharacterToDisplay(text);
+            // Find any embedded URL's and linkify
+            Matcher m = Patterns.WEB_URL.matcher(text);
+            while (m.find()) {
+                int start = m.start();
+                /*
+                 * WEB_URL_PATTERN may match domain part of email address. To detect
+                 * this false match, the character just before the matched string
+                 * should not be '@'.
+                 */
+                if (start == 0 || text.charAt(start - 1) != '@') {
+                    String url = m.group();
+                    Matcher proto = WEB_URL_PROTOCOL.matcher(url);
+                    String link;
+                    if (proto.find()) {
+                        // This is work around to force URL protocol part be lower case,
+                        // because WebView could follow only lower case protocol link.
+                        link = proto.group().toLowerCase() + url.substring(proto.end());
+                    } else {
+                        // Patterns.WEB_URL matches URL without protocol part,
+                        // so added default protocol to link.
+                        link = "http://" + url;
+                    }
+                    String href = String.format("<a href=\"%s\">%s</a>", link, url);
+                    m.appendReplacement(sb, href);
+                }
+                else {
+                    m.appendReplacement(sb, "$0");
+                }
+            }
+            m.appendTail(sb);
+        }
+        sb.append("</body></html>");
+        result = sb.toString();
+
+        return result;
     }
 
     /**
@@ -1782,7 +1929,7 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
                         // reload UI and reload everything else too
                         // pass false to LoadMessageTask to prevent looping here
                         cancelAllTasks();
-                        new LoadMessageTask(false).executeParallel();
+                        new LoadMessageTask(false, false).executeParallel();
                         break;
                     default:
                         // do nothing - we don't have a progress bar at this time
@@ -1948,6 +2095,15 @@ public abstract class MessageViewFragmentBase extends Fragment implements View.O
         for (Address sender : fromList) {
             String email = sender.getAddress();
             prefs.setSenderAsTrusted(email);
+        }
+    }
+
+    public void fetchEntireMail() {
+        if (EmailConnectivityManager.NO_ACTIVE_NETWORK
+               == EmailConnectivityManager.getActiveNetworkType(mContext)) {
+            Utility.showToast(getActivity(), R.string.no_active_network);
+        } else {
+            new LoadMessageTask(true, true).executeParallel();
         }
     }
 
