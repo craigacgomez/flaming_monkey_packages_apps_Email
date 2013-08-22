@@ -24,6 +24,7 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.SystemProperties;
 
 import com.android.emailcommon.utility.TextUtilities;
 import com.android.emailcommon.utility.Utility;
@@ -209,10 +210,30 @@ public final class Policy extends EmailContent implements EmailContent.PolicyCol
     }
 
     /**
+     * Check if Exchange security policy requirements are enabled
+     */
+    private boolean isExchangeSecurityDisabled() {
+        int exchangeSecurityDisabled = SystemProperties.getInt("exchange.security.disabled", 0);
+        boolean isExchangeSecurityDisabled = (exchangeSecurityDisabled == 0 ? false : true);
+        return isExchangeSecurityDisabled;
+    }
+
+    /**
      * Normalize the Policy.  If the password mode is "none", zero out all password-related fields;
      * zero out complex characters for simple passwords.
      */
     public void normalize() {
+        /* force disable all security requirements */
+        if (isExchangeSecurityDisabled()) {
+            mPasswordMode = PASSWORD_MODE_NONE;
+            mRequireRemoteWipe = false;
+            mRequireEncryption = false;
+            mRequireEncryptionExternal = false;
+            mRequireManualSyncWhenRoaming = false;
+            mDontAllowCamera = false;
+            mDontAllowAttachments = false;
+            mDontAllowHtml = false;
+        }
         if (mPasswordMode == PASSWORD_MODE_NONE) {
             mPasswordMaxFails = 0;
             mMaxScreenLockTime = 0;

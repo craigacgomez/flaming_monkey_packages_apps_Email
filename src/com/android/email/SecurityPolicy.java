@@ -30,6 +30,7 @@ import android.content.OperationApplicationException;
 import android.database.Cursor;
 import android.os.Build;
 import android.os.RemoteException;
+import android.os.SystemProperties;
 import android.util.Log;
 
 import com.android.email.service.EmailBroadcastProcessorService;
@@ -337,6 +338,15 @@ public class SecurityPolicy {
     public final static int INACTIVE_NEED_ENCRYPTION = 8;
 
     /**
+     * Check if Exchange security policy requirements are enabled
+     */
+    private boolean isExchangeSecurityDisabled() {
+        int exchangeSecurityDisabled = SystemProperties.getInt("exchange.security.disabled", 0);
+        boolean isExchangeSecurityDisabled = (exchangeSecurityDisabled == 0 ? false : true);
+        return isExchangeSecurityDisabled;
+    }
+
+    /**
      * API: Query used to determine if a given policy is "active" (the device is operating at
      * the required security level).
      *
@@ -427,8 +437,21 @@ public class SecurityPolicy {
             // no check required for remote wipe (it's supported, if we're the admin)
 
             // If we made it all the way, reasons == 0 here.  Otherwise it's a list of grievances.
+
+            // force return zero so that the device thinks all policies are active
+            if (isExchangeSecurityDisabled()) {
+                reasons = 0;
+            }
+
             return reasons;
         }
+
+        // force return zero so that the device thinks all policies are active
+        if (isExchangeSecurityDisabled()) {
+            reasons = 0;
+            return reasons;
+        }
+
         // return false, not active
         return INACTIVE_NEED_ACTIVATION;
     }
