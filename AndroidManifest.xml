@@ -335,7 +335,6 @@
         <service
             android:name=".service.MailService"
             android:enabled="false"
-            android:exported="true"
             >
             <intent-filter>
                 <action

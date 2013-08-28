@@ -59,6 +59,21 @@
                 android:layout_height="wrap_content"
                 android:layout_width="match_parent" />
         </TableRow>
+	<TableRow
+            android:id="@+id/account_sync_size_row"
+            android:paddingTop="16dip"
+            android:visibility="gone" >
+            <TextView
+                android:layout_height="wrap_content"
+                android:layout_width="wrap_content"
+                android:layout_marginRight="16dip"
+                android:text="@string/account_setup_options_mail_sync_size_label"
+                android:textColor="?android:attr/textColorPrimary" />
+            <Spinner
+                android:id="@+id/account_sync_size"
+                android:layout_height="wrap_content"
+                android:layout_width="match_parent" />
+        </TableRow>
     </TableLayout>
     <View
         android:id="@+id/account_default_divider_upper"
@@ -142,7 +157,8 @@
         android:layout_marginLeft="32dip"
         android:layout_height="wrap_content"
         android:layout_width="match_parent"
-        android:text="@string/account_setup_options_sync_email_label" />
+        android:text="@string/account_setup_options_sync_email_label"
+	android:visibility="gone"  />
     <View
         android:id="@+id/account_sync_email_divider"
         android:layout_below="@+id/account_sync_email"
