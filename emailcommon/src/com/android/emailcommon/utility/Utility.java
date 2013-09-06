@@ -344,7 +344,12 @@ public class Utility {
         Cursor c = resolver.query(Account.CONTENT_URI, projection, selection, null, null);
         try {
             if (c.moveToNext()) {
-                int syncSize = Integer.parseInt(c.getString(1));
+                int syncSize = ENTIRE_MAIL;
+                try {
+                    syncSize = Integer.parseInt(c.getString(1));
+                } catch (Exception ex) {
+                    Log.w(Logging.LOG_TAG, "Error retrieving account sync size. Falling back to entire mail" + ex);
+                }
                 return syncSize;
             } else {
                 return -1;
